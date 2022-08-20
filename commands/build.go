@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -128,6 +129,11 @@ func runBuild(dockerCli command.Cli, in buildOptions) (err error) {
 		return err
 	}
 
+	labels, err := addGitProvenance(in.labels, in.contextPath, in.dockerfileName)
+	if err != nil {
+		return err
+	}
+
 	opts := build.Options{
 		Inputs: build.Inputs{
 			ContextPath:    in.contextPath,
@@ -138,7 +144,7 @@ func runBuild(dockerCli command.Cli, in buildOptions) (err error) {
 		BuildArgs:     listToMap(in.buildArgs, true),
 		ExtraHosts:    in.extraHosts,
 		ImageIDFile:   in.imageIDFile,
-		Labels:        listToMap(in.labels, false),
+		Labels:        listToMap(labels, false),
 		NetworkMode:   in.networkMode,
 		NoCache:       noCache,
 		NoCacheFilter: in.noCacheFilter,
@@ -641,6 +647,55 @@ func parsePrintFunc(str string) (*build.PrintFunc, error) {
 		}
 	}
 	return f, nil
+}
+
+func addGitProvenance(labels []string, contextPath string, dockerfilePath string) ([]string, error) {
+	if v, ok := os.LookupEnv("BUILDX_GIT_INFO"); ok && contextPath != "" {
+		if len(labels) == 0 {
+			labels = make([]string, 0)
+		}
+		// figure out in which directory the git command needs to run
+		var wd string
+		if !filepath.IsAbs(contextPath) {
+			cwd, _ := os.Getwd()
+			wd, _ = filepath.Abs(filepath.Join(cwd, contextPath))
+		} else {
+			wd = contextPath
+		}
+		// obtain Git sha of current HEAD
+		cmd := exec.Command("git", "rev-parse", "HEAD")
+		cmd.Dir = wd
+		sha, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("error obtaining git head: %w", err)
+		}
+		// check if the current HEAD is clean
+		cmd = exec.Command("git", "diff", "--quiet", "--exit-code")
+		cmd.Dir = wd
+		_, err = cmd.Output()
+		if err == nil {
+			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.revision=%s", strings.TrimSpace(string(sha)))}...)
+		} else {
+			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.revision=%s-dirty", strings.TrimSpace(string(sha)))}...)
+		}
+		// add the origin url if full Git details are requested
+		if v == "full" {
+			cmd = exec.Command("git", "config", "--get", "remote.origin.url")
+			cmd.Dir = wd
+			remote, err := cmd.Output()
+			if err != nil {
+				return nil, err
+			}
+			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.source=%s", strings.TrimSpace(string(remote)))}...)
+		}
+		// add Dockerfile path; there is no org.opencontainers annotation for this
+		if dockerfilePath == "" {
+			dockerfilePath = "Dockerfile"
+		}
+		labels = append(labels, []string{fmt.Sprintf("com.docker.image.dockerfile.path=%s", dockerfilePath)}...)
+	}
+
+	return labels, nil
 }
 
 func writeMetadataFile(filename string, dt interface{}) error {
