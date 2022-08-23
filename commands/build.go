@@ -129,10 +129,11 @@ func runBuild(dockerCli command.Cli, in buildOptions) (err error) {
 		return err
 	}
 
-	labels, err := addGitProvenance(in.labels, in.contextPath, in.dockerfileName)
+	newOutputs, err := addGitProvenance(in.outputs, in.contextPath, in.dockerfileName)
 	if err != nil {
 		return err
 	}
+	in.outputs = newOutputs
 
 	opts := build.Options{
 		Inputs: build.Inputs{
@@ -144,7 +145,7 @@ func runBuild(dockerCli command.Cli, in buildOptions) (err error) {
 		BuildArgs:     listToMap(in.buildArgs, true),
 		ExtraHosts:    in.extraHosts,
 		ImageIDFile:   in.imageIDFile,
-		Labels:        listToMap(labels, false),
+		Labels:        listToMap(in.labels, false),
 		NetworkMode:   in.networkMode,
 		NoCache:       noCache,
 		NoCacheFilter: in.noCacheFilter,
@@ -649,10 +650,10 @@ func parsePrintFunc(str string) (*build.PrintFunc, error) {
 	return f, nil
 }
 
-func addGitProvenance(labels []string, contextPath string, dockerfilePath string) ([]string, error) {
+func addGitProvenance(outputs []string, contextPath string, dockerfilePath string) ([]string, error) {
 	if v, ok := os.LookupEnv("BUILDX_GIT_INFO"); ok && contextPath != "" {
-		if len(labels) == 0 {
-			labels = make([]string, 0)
+		if len(outputs) == 0 {
+			outputs = make([]string, 0)
 		}
 		// figure out in which directory the git command needs to run
 		var wd string
@@ -662,6 +663,9 @@ func addGitProvenance(labels []string, contextPath string, dockerfilePath string
 		} else {
 			wd = contextPath
 		}
+
+		gitInfo := []string{"type=image", "name=target", "oci-mediatypes=true"}
+
 		// obtain Git sha of current HEAD
 		cmd := exec.Command("git", "rev-parse", "HEAD")
 		cmd.Dir = wd
@@ -674,9 +678,9 @@ func addGitProvenance(labels []string, contextPath string, dockerfilePath string
 		cmd.Dir = wd
 		_, err = cmd.Output()
 		if err == nil {
-			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.revision=%s", strings.TrimSpace(string(sha)))}...)
+			gitInfo = append(gitInfo, []string{fmt.Sprintf("annotation.org.opencontainers.image.revision=%s", strings.TrimSpace(string(sha)))}...)
 		} else {
-			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.revision=%s-dirty", strings.TrimSpace(string(sha)))}...)
+			gitInfo = append(gitInfo, []string{fmt.Sprintf("annotation.org.opencontainers.image.revision=%s-dirty", strings.TrimSpace(string(sha)))}...)
 		}
 		// add the origin url if full Git details are requested
 		if v == "full" {
@@ -686,16 +690,17 @@ func addGitProvenance(labels []string, contextPath string, dockerfilePath string
 			if err != nil {
 				return nil, err
 			}
-			labels = append(labels, []string{fmt.Sprintf("org.opencontainers.image.source=%s", strings.TrimSpace(string(remote)))}...)
+			gitInfo = append(gitInfo, []string{fmt.Sprintf("annotation.org.opencontainers.image.source=%s", strings.TrimSpace(string(remote)))}...)
 		}
 		// add Dockerfile path; there is no org.opencontainers annotation for this
 		if dockerfilePath == "" {
 			dockerfilePath = "Dockerfile"
 		}
-		labels = append(labels, []string{fmt.Sprintf("com.docker.image.dockerfile.path=%s", dockerfilePath)}...)
+		gitInfo = append(gitInfo, []string{fmt.Sprintf("annotation.com.docker.image.dockerfile.path=%s", dockerfilePath)}...)
+		outputs = append(outputs, []string{strings.Join(gitInfo[:], ",")}...)
 	}
 
-	return labels, nil
+	return outputs, nil
 }
 
 func writeMetadataFile(filename string, dt interface{}) error {
